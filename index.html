@@ -30,7 +30,9 @@
    · 奶蛙角色使用本地图片素材 assets/frog1-5.png（无外网资源）
    · 背景 / 气泡 / HUD / 特效由 Canvas2D 绘制
    · 零第三方库，鼠标 / 触屏均可操控，窗口自适应
-   · 新增【闪电技能】：每 30 秒一次，消灭场上最大的奶蛙
+   · 【技能1 闪电】每 30 秒一次，消灭场上最大的奶蛙（空格键）
+   · 【技能2 爆炸】每 30 秒一次，范围内全部奶蛙炸飞（E 键）
+   · 【无敌】开局 10 秒无敌护盾，撞到大奶蛙也不会死
    ============================================================ */
 
 /* ===================== 配置常量（可自由调参） ===================== */
@@ -47,9 +49,19 @@ const SHOW_DANGER_RING  = true;  // 是否给"比你大"的奶蛙画红色警示
 const NPC_FLEE_RANGE    = 200;   // 小型奶蛙见到玩家后的逃跑距离
 const NPC_SIZE_MIN      = 18;    // NPC 最小体型
 const NPC_SIZE_MAX      = 80;    // NPC 最大体型
-/* —— 【新增】技能配置 —— */
-const SKILL_COOLDOWN    = 30;    // 技能冷却时间（秒）：每隔 30 秒可发动一次
-const SKILL_START_READY = true;  // 开局是否直接可用（false = 开局也进入 30 秒冷却）
+
+/* —— 【技能1 闪电】配置 —— */
+const SKILL_COOLDOWN    = 30;    // 闪电技能冷却时间（秒）
+const SKILL_START_READY = true;  // 开局是否直接可用（false = 开局也进入冷却）
+
+/* —— 【新增：无敌护盾】配置 —— */
+const PLAYER_INVINCIBLE_TIME = 10;   // 开局无敌时间（秒）
+
+/* —— 【新增：爆炸技能】配置 —— */
+const BOMB_COOLDOWN       = 30;   // 爆炸技能冷却时间（秒）
+const BOMB_RADIUS         = 230;  // 爆炸基础半径（px，会按屏幕尺寸自动收缩）
+const BOMB_READY_AT_START = true; // 爆炸技能开局是否直接可用
+const BOMB_SCORE_RATE     = 10;   // 每个被炸奶蛙的得分系数（体型 × 该值）
 
 /* —— 图片素材配置（全部为仓库内本地资源，无外网 URL） —— */
 const FROG_SOURCES = [
@@ -59,9 +71,7 @@ const FROG_SOURCES = [
   'assets/frog4.png',   // 4 惊讶睁大双眼
   'assets/frog5.png',   // 5 坏笑咧嘴
 ];
-// 各素材中"蛙头朝向"的修正角（弧度），运行时素材会旋转到运动方向，该值保证蛙头始终朝前：
-// 0 = 蛙头朝右 · Math.PI = 朝左 · Math.PI/2 = 朝上 · -Math.PI/2 = 朝下
-// 若某只奶蛙游起来方向不对，改对应项即可（在开始界面即可检查）
+// 各素材中"蛙头朝向"的修正角（弧度）
 const FROG_HEADINGS = [
   Math.PI / 2,   // frog1 大笑张嘴：素材蛙头朝上
   Math.PI / 2,   // frog2 眯眼微笑：预设朝上
@@ -69,7 +79,7 @@ const FROG_HEADINGS = [
   Math.PI / 2,   // frog4 惊讶：预设朝上
   Math.PI,       // frog5 坏笑咧嘴：预设朝左
 ];
-const FROG_BODY_RATIO = 0.45;    // 蛙体半径占图片宽度的默认比例（仅素材自动校准失败时使用）
+const FROG_BODY_RATIO = 0.45;    // 蛙体半径占图片宽度的默认比例
 
 /* ===================== 基础变量 ===================== */
 const canvas = document.getElementById('game');
@@ -81,29 +91,28 @@ const VARIANT_NAMES = ['大笑', '眯眼微笑', '严肃平静', '惊讶', '坏�
 let W = window.innerWidth, H = window.innerHeight;
 let state = 'start';            // 'start' | 'playing' | 'gameover' | 'win'
 let score = 0;
-let time = 0, lastTime = 0;     // 全局时间（秒），用于动画
-let gameStartTime = 0;          // 本局开始时间（用于提示渐隐）
-let lastKiller = null;          // 吃掉玩家的凶手奶蛙信息
-let buttons = [];               // 当前帧的按钮点击区域
+let time = 0, lastTime = 0;     // 全局时间（秒）
+let gameStartTime = 0;          // 本局开始时间
+let lastKiller = null;          // 吃掉玩家的凶手
+let buttons = [];               // 当前帧按钮点击区
 let particles = [], floatTexts = [];
 let bubbles = [], weeds = [], pebbles = [];
 let npcs = [];
 let player = null;
 const mouse = { x: 0, y: 0, active: false };
+let screenFlash = 0;            // 【新增】全屏爆炸闪光强度 0~1
 
 /* ===================== 素材预加载（含失败容错） ===================== */
-const frogImages = [];          // 5 个就绪素材：成功为 Image，失败为备用 canvas
-let assetsLoaded = 0;           // 已处理数量（成功或失败都计数）
-let assetsReady = false;        // 全部处理完成才允许开始游戏
+const frogImages = [];
+let assetsLoaded = 0;
+let assetsReady = false;
 
-// 素材加载失败时的备用奶蛙（canvas 手绘，保证游戏始终可玩）
 function makeFallbackFrog(variant) {
   const c = document.createElement('canvas');
   c.width = 512; c.height = 512;
   const g = c.getContext('2d');
   const R = c.width * FROG_BODY_RATIO, cx = 256, cy = 256;
   c._ratio = FROG_BODY_RATIO; c._ox = 0; c._oy = 0; c._heading = 0;
-  // 简单圆胖黄蛙
   g.fillStyle = '#FFD34E';
   g.strokeStyle = 'rgba(160,110,30,0.5)';
   g.lineWidth = 8;
@@ -120,7 +129,6 @@ function makeFallbackFrog(variant) {
   g.lineWidth = R * 0.06;
   g.lineCap = 'round';
   g.beginPath(); g.arc(cx + R * 0.18, cy + R * 0.38, R * 0.2, Math.PI * 0.15, Math.PI * 0.85); g.stroke();
-  // 表情编号角标，便于区分
   g.fillStyle = 'rgba(0,0,0,0.55)';
   g.font = 'bold 42px sans-serif';
   g.textAlign = 'center';
@@ -129,20 +137,18 @@ function makeFallbackFrog(variant) {
   return c;
 }
 
-// 根据素材透明区域自动校准：蛙体半径占图片宽度的比例 + 内容中心偏移，
-// 让任意尺寸、任意留白、内容不在正中的素材都能正确缩放和居中
 function calibrateFrog(img) {
   const fallback = { ratio: FROG_BODY_RATIO, ox: 0, oy: 0 };
   try {
     const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
     if (!w || !h) return fallback;
-    const probe = document.createElement('canvas');  // 缩小到 96px 扫描，速度快且比例不变
+    const probe = document.createElement('canvas');
     const scale = 96 / Math.max(w, h);
     probe.width = Math.max(1, Math.round(w * scale));
     probe.height = Math.max(1, Math.round(h * scale));
     const g = probe.getContext('2d');
     g.drawImage(img, 0, 0, probe.width, probe.height);
-    const data = g.getImageData(0, 0, probe.width, probe.height).data; // 本地 file:// 可能受限，异常时退回默认
+    const data = g.getImageData(0, 0, probe.width, probe.height).data;
     let x0 = probe.width, x1 = -1, y0 = probe.height, y1 = -1;
     for (let y = 0; y < probe.height; y++) {
       for (let x = 0; x < probe.width; x++) {
@@ -152,58 +158,55 @@ function calibrateFrog(img) {
         }
       }
     }
-    if (x1 < x0) return fallback;                    // 全透明图片
-    const half = Math.max(x1 - x0, y1 - y0) / 2;     // 外接框半宽取最大边：旋转后沿运动方向的视觉半径与游戏体型一致
+    if (x1 < x0) return fallback;
+    const half = Math.max(x1 - x0, y1 - y0) / 2;
     return {
       ratio: half / probe.width,
-      ox: (x0 + x1) / 2 / scale - w / 2,             // 内容中心相对图片中心的偏移（图片像素）
+      ox: (x0 + x1) / 2 / scale - w / 2,
       oy: (y0 + y1) / 2 / scale - h / 2,
     };
   } catch (e) {
-    return fallback;                                 // 跨域 / file:// 安全限制时退回默认值
+    return fallback;
   }
 }
 
-// 预加载 5 张本地图片；全部完成（或失败兜底）后 assetsReady = true
 function preloadAssets() {
   FROG_SOURCES.forEach((src, i) => {
     const img = new Image();
     frogImages[i] = img;
     img.onload = () => {
-      Object.assign(img, calibrateFrog(img));        // 自动校准体型比例与中心偏移
-      img._heading = FROG_HEADINGS[i];               // 记录该素材的蛙头朝向修正角
+      Object.assign(img, calibrateFrog(img));
+      img._heading = FROG_HEADINGS[i];
       assetsLoaded++;
       if (assetsLoaded === FROG_SOURCES.length) assetsReady = true;
     };
     img.onerror = () => {
-      // 容错：加载失败时使用 canvas 绘制的备用奶蛙
       assetsLoaded++;
       frogImages[i] = makeFallbackFrog(i + 1);
       if (assetsLoaded === FROG_SOURCES.length) assetsReady = true;
     };
-    img.src = src;             // 只读取仓库内本地资源
+    img.src = src;
   });
 }
 
 // 绘制奶蛙图片：x,y 中心，size 为游戏体型半径，angle 朝向
 function drawFrog(img, x, y, size, angle, t, breathPhase, pulse = 0, alpha = 1) {
-  if (!img || !img.width) return;                    // 素材未就绪时跳过
-  const ratio = img._ratio || FROG_BODY_RATIO;       // 蛙体半径占图片宽度的比例（自动校准）
-  const dw = size / ratio;                           // 蛙体在屏幕上应占的显示宽度
-  const dh = dw * (img.height / img.width);          // 保持素材原始宽高比
-  const k = dw / img.width;                          // 图片像素 → 屏幕像素换算
+  if (!img || !img.width) return;
+  const ratio = img._ratio || FROG_BODY_RATIO;
+  const dw = size / ratio;
+  const dh = dw * (img.height / img.width);
+  const k = dw / img.width;
   ctx.save();
   ctx.translate(x, y);
-  ctx.rotate(angle + (img._heading || 0));           // 旋转到运动方向（_heading 修正素材蛙头朝向）
-  const s = 1 + Math.sin(t * 3.5 + breathPhase) * 0.035 + pulse * 0.12; // 轻微呼吸缩放 + 吞噬弹性
+  ctx.rotate(angle + (img._heading || 0));
+  const s = 1 + Math.sin(t * 3.5 + breathPhase) * 0.035 + pulse * 0.12;
   ctx.scale(s, s);
   ctx.globalAlpha = alpha;
-  // 按素材内容中心对齐绘制（四周留白、内容偏移都能正确居中）
   ctx.drawImage(img, -dw / 2 + (img._ox || 0) * k, -dh / 2 + (img._oy || 0) * k, dw, dh);
   ctx.restore();
 }
 
-// 小皇冠（通关 / 接近通关时戴在玩家奶蛙头上）
+// 小皇冠
 function drawCrown(x, y, s) {
   ctx.fillStyle = '#FFC93C';
   ctx.strokeStyle = '#D89A00';
@@ -228,13 +231,11 @@ function drawCrown(x, y, s) {
 /* ===================== 通用工具 ===================== */
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const pick  = arr => arr[Math.floor(Math.random() * arr.length)];
-// 角度归一化到 [-PI, PI]
 function normAngle(a) {
   while (a > Math.PI) a -= TAU;
   while (a < -Math.PI) a += TAU;
   return a;
 }
-// 圆角矩形路径（x,y 为左上角）
 function rr(x, y, w, h, r) {
   ctx.beginPath();
   ctx.moveTo(x + r, y);
@@ -245,6 +246,8 @@ function rr(x, y, w, h, r) {
   ctx.closePath();
 }
 function getUiScale() { return clamp(Math.min(W, H) / 640, 0.62, 1.2); }
+// 爆炸实际半径（小屏自动收缩，避免一炸全屏）
+function getBombRadius() { return Math.min(BOMB_RADIUS, Math.min(W, H) * 0.55); }
 
 /* ===================== 体型等级 ===================== */
 const SIZE_LEVELS = [
@@ -260,9 +263,8 @@ function getLevel(size) {
   return { lv: idx + 1, name: SIZE_LEVELS[idx].name };
 }
 
-/* ===================== 场景装饰：气泡 / 水草 / 鹅卵石 ===================== */
+/* ===================== 场景装饰 ===================== */
 function initScenery() {
-  // 气泡：数量随面积变化
   bubbles = [];
   const count = clamp(Math.round(W * H / 40000), 10, 30);
   for (let i = 0; i < count; i++) {
@@ -270,13 +272,12 @@ function initScenery() {
       x: Math.random() * W,
       y: Math.random() * H,
       r: 2 + Math.random() * 7,
-      speed: 15 + Math.random() * 45,   // px/s，向上漂
+      speed: 15 + Math.random() * 45,
       phase: Math.random() * TAU,
       wob: 0.5 + Math.random() * 1.5,
       alpha: 0.25 + Math.random() * 0.5,
     });
   }
-  // 水草：分布在底部
   weeds = [];
   const n = Math.max(6, Math.round(W / 140));
   for (let i = 0; i < n; i++) {
@@ -288,7 +289,6 @@ function initScenery() {
       color: pick(['rgba(96,160,84,0.75)', 'rgba(76,142,72,0.7)', 'rgba(126,186,96,0.7)']),
     });
   }
-  // 鹅卵石
   pebbles = [];
   for (let i = 0; i < 10; i++) {
     const rx = 8 + Math.random() * 18;
@@ -315,19 +315,19 @@ function createPlayer() {
     size: PLAYER_START_SIZE,
     angle: 0,
     targetX: W / 2, targetY: H / 2,
-    pulse: 0,                       // 吞噬时的弹性放大
+    pulse: 0,
     breathPhase: Math.random() * TAU,
-    skillCd: SKILL_START_READY ? 0 : SKILL_COOLDOWN,  // 【新增】技能剩余冷却（秒），0 = 可用
+    skillCd: SKILL_START_READY ? 0 : SKILL_COOLDOWN,      // 闪电技能剩余冷却
+    bombCd:  BOMB_READY_AT_START ? 0 : BOMB_COOLDOWN,      // 【新增】爆炸技能剩余冷却
+    invincible: PLAYER_INVINCIBLE_TIME,                     // 【新增】无敌剩余时间
   };
 }
-// 随机 NPC 体型：偏向小型，让开局有足够多可吃的目标
 function randomNpcSize() {
   const t = Math.pow(Math.random(), 1.6);
   return NPC_SIZE_MIN + t * (NPC_SIZE_MAX - NPC_SIZE_MIN);
 }
 function createNpc(awayFromPlayer) {
   let size = randomNpcSize();
-  // 随机位置；awayFromPlayer 时尽量远离玩家，避免"出生即死"
   const safeDist = Math.min(240, Math.max(W, H) * 0.4) + size;
   let x = 0, y = 0, d = 0, tries = 0;
   do {
@@ -336,21 +336,19 @@ function createNpc(awayFromPlayer) {
     d = Math.hypot(x - player.x, y - player.y);
     tries++;
   } while (tries < 14 && awayFromPlayer && d < safeDist);
-  // 小屏实在躲不开时：缩小体型，保证公平
   if (awayFromPlayer && d < 120 && size > player.size) size = player.size * 0.8;
   return {
     x, y, size,
-    variant: Math.floor(Math.random() * 5),       // 随机选用 5 张图片之一
+    variant: Math.floor(Math.random() * 5),
     angle: Math.random() * TAU,
-    speed: NPC_SPEED_BASE * (60 / size) * 60,     // px/s：体型越大游得越慢
+    speed: NPC_SPEED_BASE * (60 / size) * 60,
     breathPhase: Math.random() * TAU,
     wobblePhase: Math.random() * TAU,
-    spawnT: 0,                    // 出生动画进度 0~1
+    spawnT: 0,
   };
 }
 
 /* ===================== 粒子特效 ===================== */
-// 吞噬时的黄色光点爆炸 + 扩散光环
 function spawnBurst(x, y, color, count = 16) {
   particles.push({ type: 'ring', x, y, r: 6, vr: 140, life: 0.35, maxLife: 0.35, color });
   for (let i = 0; i < count; i++) {
@@ -365,7 +363,31 @@ function spawnBurst(x, y, color, count = 16) {
     });
   }
 }
-// 通关彩带
+
+/* —— 【新增】爆炸特效：多层冲击环 + 火焰碎片 + 全屏闪光 —— */
+function spawnExplosion(x, y, radius) {
+  // 三层扩散冲击环（白 → 金 → 橙红）
+  particles.push({ type: 'ring', x, y, r: radius * 0.12, vr: radius * 3.4, life: 0.5,  maxLife: 0.5,  color: '#FFFFFF' });
+  particles.push({ type: 'ring', x, y, r: radius * 0.22, vr: radius * 2.3, life: 0.72, maxLife: 0.72, color: '#FFC93C' });
+  particles.push({ type: 'ring', x, y, r: radius * 0.32, vr: radius * 1.5, life: 1.0,  maxLife: 1.0,  color: '#FF6B3D' });
+  particles.push({ type: 'ring', x, y, r: radius * 0.42, vr: radius * 1.0, life: 1.25, maxLife: 1.25, color: 'rgba(255,120,60,0.7)' });
+  // 火焰碎片
+  const fireColors = ['#FFF3B0', '#FFD34E', '#FFA726', '#FF7043', '#FF5722'];
+  for (let i = 0; i < 60; i++) {
+    const a = Math.random() * TAU;
+    const sp = radius * (0.7 + Math.random() * 3.4);
+    particles.push({
+      type: 'dot', x, y,
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      r: 3 + Math.random() * 6,
+      life: 0.45 + Math.random() * 0.55, maxLife: 1.0,
+      color: pick(fireColors),
+    });
+  }
+  // 全屏暖色闪光
+  screenFlash = 0.85;
+}
+
 function spawnConfetti() {
   const colors = ['#FFD34E', '#7CB342', '#FF8FA3', '#FFFFFF', '#4FC3F7', '#FFB300'];
   for (let i = 0; i < 90; i++) {
@@ -383,6 +405,7 @@ function spawnConfetti() {
     });
   }
 }
+
 function updateParticles(dt) {
   for (let i = particles.length - 1; i >= 0; i--) {
     const p = particles[i];
@@ -391,7 +414,7 @@ function updateParticles(dt) {
     if (p.type === 'dot') {
       p.x += p.vx * dt;
       p.y += p.vy * dt;
-      p.vy += 90 * dt;                                   // 轻微下坠
+      p.vy += 90 * dt;
     } else if (p.type === 'ring') {
       p.r += p.vr * dt;
     } else if (p.type === 'confetti') {
@@ -400,7 +423,7 @@ function updateParticles(dt) {
       p.rot += p.vr * dt;
       if (p.y > H + 20) p.life = 0;
     }
-    // 'bolt'（闪电）不需要更新坐标，只随时间衰减
+    // 'bolt'（闪电）不需要更新坐标
   }
   for (let i = floatTexts.length - 1; i >= 0; i--) {
     const f = floatTexts[i];
@@ -413,7 +436,6 @@ function updateParticles(dt) {
 /* ===================== 输入 ===================== */
 function setPlayerTarget(e) {
   player.targetX = e.clientX;
-  // 触屏上抬目标点，避免手指遮挡奶蛙
   player.targetY = e.clientY - (e.pointerType === 'touch' ? 70 : 0);
 }
 canvas.addEventListener('pointermove', e => {
@@ -423,7 +445,6 @@ canvas.addEventListener('pointermove', e => {
 canvas.addEventListener('pointerdown', e => {
   e.preventDefault();
   mouse.x = e.clientX; mouse.y = e.clientY; mouse.active = true;
-  // 素材预加载完成后才允许开始
   if (state === 'start') {
     if (assetsReady) startGame();
   } else if (state === 'gameover' || state === 'win') {
@@ -434,23 +455,23 @@ canvas.addEventListener('pointerdown', e => {
       }
     }
   } else if (state === 'playing') {
-    // 【新增】点击右下角技能按钮 → 释放技能（不改变移动目标）
+    // 点击右下角技能按钮（闪电 / 爆炸），不改变移动目标
     for (const b of buttons) {
       if (!b.skill) continue;
       if (mouse.x >= b.x && mouse.x <= b.x + b.w && mouse.y >= b.y && mouse.y <= b.y + b.h) {
-        useSkill();
+        if (b.skill === 'bolt') useSkill();
+        else if (b.skill === 'bomb') useBomb();
         return;
       }
     }
   }
-  setPlayerTarget(e);                                    // 点击位置也作为移动目标
+  setPlayerTarget(e);
 });
 window.addEventListener('keydown', e => {
-  // 【新增】游戏中按空格发动技能
-  if (e.code === 'Space' && state === 'playing') {
-    e.preventDefault();
-    useSkill();
-    return;
+  // 【游戏中】空格 = 闪电，E = 爆炸
+  if (state === 'playing') {
+    if (e.code === 'Space') { e.preventDefault(); useSkill(); return; }
+    if (e.code === 'KeyE')  { e.preventDefault(); useBomb();  return; }
   }
   if ((e.code === 'Space' || e.code === 'Enter') && state !== 'playing' && assetsReady) {
     e.preventDefault();
@@ -465,6 +486,7 @@ function startGame() { restart(); }
 function restart() {
   score = 0;
   lastKiller = null;
+  screenFlash = 0;
   player = createPlayer();
   npcs = [];
   for (let i = 0; i < NPC_COUNT_MAX; i++) npcs.push(createNpc(true));
@@ -474,47 +496,86 @@ function restart() {
   state = 'playing';
 }
 
-/* ===================== 【新增】技能：雷霆一击 =====================
-   效果：消灭场上体型最大的那只奶蛙（不论它比你大还是比你小）
-   冷却：SKILL_COOLDOWN 秒（默认 30）
-   触发：按空格键 / 点击右下角技能按钮
-   ================================================================ */
+/* ===================== 技能1：雷霆一击（消灭最大奶蛙） ===================== */
 function useSkill() {
   if (state !== 'playing' || !player) return false;
-  if (player.skillCd > 0) return false;      // 冷却中
+  if (player.skillCd > 0) return false;
   if (!npcs.length) return false;
 
-  // 1. 找到场上体型最大的奶蛙
   let target = null;
   for (const n of npcs) {
     if (!target || n.size > target.size) target = n;
   }
   if (!target) return false;
 
-  // 2. 进入冷却
   player.skillCd = SKILL_COOLDOWN;
 
-  // 3. 特效：玩家 → 目标的闪电链
+  // 玩家 → 目标的闪电链
   particles.push({
     type: 'bolt',
     x1: player.x, y1: player.y,
     x2: target.x, y2: target.y,
     life: 0.32, maxLife: 0.32,
   });
-  // 目标处爆炸 + 冲击环
   spawnBurst(target.x, target.y, '#5FD8FF', 34);
   particles.push({ type: 'ring', x: target.x, y: target.y, r: target.size * 0.5, vr: 460, life: 0.6, maxLife: 0.6, color: '#B3F0FF' });
-  // 玩家自身冲击环
   particles.push({ type: 'ring', x: player.x, y: player.y, r: player.size * 0.9, vr: 320, life: 0.4, maxLife: 0.4, color: '#9AE6FF' });
 
-  // 4. 计分（不额外成长，避免通关过快；想给成长就把下面这行注释掉）
   const pts = Math.round(target.size * 10);
   score += pts;
   floatTexts.push({ x: target.x, y: target.y - target.size * 0.8, text: '消灭 +' + pts, life: 1.3 });
 
-  // 5. 原位置重生一只新 NPC，保持场上数量不变
   Object.assign(target, createNpc(true));
+  return true;
+}
 
+/* ===================== 【新增】技能2：烈焰爆炸（范围内全部炸飞） =====================
+   效果：以玩家为中心引爆，半径内所有奶蛙（不论大小）全部被炸飞并计分
+   冷却：BOMB_COOLDOWN 秒（默认 30）
+   触发：按 E 键 / 点击右下角爆炸按钮
+   ================================================================================ */
+function useBomb() {
+  if (state !== 'playing' || !player) return false;
+  if (player.bombCd > 0) return false;
+
+  player.bombCd = BOMB_COOLDOWN;
+
+  const cx = player.x, cy = player.y;
+  const R = getBombRadius();
+
+  // 1. 爆炸视觉特效 + 全屏闪光
+  spawnExplosion(cx, cy, R);
+
+  // 2. 清理半径内的所有 NPC
+  let killed = 0, totalPts = 0;
+  for (const n of npcs) {
+    const d = Math.hypot(n.x - cx, n.y - cy);
+    if (d <= R + n.size * 0.6) {
+      const pts = Math.round(n.size * BOMB_SCORE_RATE);
+      totalPts += pts;
+      killed++;
+      // 被炸飞的个体小爆炸
+      spawnBurst(n.x, n.y, '#FF7043', 8);
+      floatTexts.push({ x: n.x, y: n.y - n.size * 0.8, text: '+' + pts, life: 1 });
+      // 原地重生，保持场上数量
+      Object.assign(n, createNpc(true));
+    }
+  }
+
+  if (killed > 0) {
+    score += totalPts;
+    floatTexts.push({
+      x: cx, y: cy - player.size * 2.2,
+      text: '爆炸！消灭 ' + killed + ' 只 +' + totalPts,
+      life: 1.6,
+    });
+  } else {
+    floatTexts.push({
+      x: cx, y: cy - player.size * 2.2,
+      text: '爆炸！',
+      life: 1.2,
+    });
+  }
   return true;
 }
 
@@ -523,9 +584,14 @@ function update(dt) {
   time += dt;
   updateBubbles(dt);
   updateParticles(dt);
+  // 全屏闪光衰减（任何状态下都衰减）
+  if (screenFlash > 0) screenFlash = Math.max(0, screenFlash - dt * 2.6);
+
   if (player) {
     player.pulse = Math.max(0, player.pulse - dt * 2.5);
-    player.skillCd = Math.max(0, player.skillCd - dt);   // 【新增】技能冷却倒计时
+    player.skillCd    = Math.max(0, player.skillCd - dt);      // 闪电冷却
+    player.bombCd     = Math.max(0, player.bombCd - dt);       // 【新增】爆炸冷却
+    player.invincible = Math.max(0, player.invincible - dt);   // 【新增】无敌倒计时
   }
   if (state !== 'playing') return;
 
@@ -535,7 +601,6 @@ function update(dt) {
 }
 
 function updatePlayer(dt) {
-  // 玩家速度：体型越大越慢
   const spd = PLAYER_SPEED_BASE * Math.pow(50 / player.size, 0.7) * 60;
   const dx = player.targetX - player.x;
   const dy = player.targetY - player.y;
@@ -544,7 +609,6 @@ function updatePlayer(dt) {
     const step = Math.min(d, spd * dt);
     player.x += dx / d * step;
     player.y += dy / d * step;
-    // 朝向移动方向平滑旋转（最短路径）
     const targetAngle = Math.atan2(dy, dx);
     player.angle += normAngle(targetAngle - player.angle) * Math.min(1, 12 * dt);
   }
@@ -553,7 +617,6 @@ function updatePlayer(dt) {
 }
 
 function updateNpcs(dt) {
-  // NPC 与 NPC 之间的软分离（避免叠成一团）
   for (let i = 0; i < npcs.length; i++) {
     for (let j = i + 1; j < npcs.length; j++) {
       const a = npcs[i], b = npcs[j];
@@ -570,12 +633,9 @@ function updateNpcs(dt) {
 
   for (const n of npcs) {
     n.spawnT = Math.min(1, n.spawnT + dt * 3);
-    // 朝当前角度游动
     n.x += Math.cos(n.angle) * n.speed * dt;
     n.y += Math.sin(n.angle) * n.speed * dt;
-    // 轻微蜿蜒，游动更自然
     n.angle += Math.sin(time * 1.4 + n.wobblePhase) * 0.45 * dt;
-    // 小型奶蛙见到大玩家会逃跑
     if (n.size < player.size * EAT_RATIO) {
       const dpx = n.x - player.x, dpy = n.y - player.y;
       const dp = Math.hypot(dpx, dpy);
@@ -585,7 +645,6 @@ function updateNpcs(dt) {
         n.angle += clamp(diff, -1, 1) * 3 * dt;
       }
     }
-    // 碰到边界反弹（带随机抖动）
     const m = n.size * 1.1;
     if (n.x < m) { n.x = m; n.angle = Math.PI - n.angle + (Math.random() - 0.5) * 0.7; }
     else if (n.x > W - m) { n.x = W - m; n.angle = Math.PI - n.angle + (Math.random() - 0.5) * 0.7; }
@@ -594,36 +653,47 @@ function updateNpcs(dt) {
   }
 }
 
-// 核心碰撞规则：大吃小、小被吃、体型接近互相弹开
+// 核心碰撞规则：大吃小、小被吃、体型接近互相弹开；【无敌期间不会死亡】
 function handleCollisions() {
   for (const n of npcs) {
-    if (n.spawnT < 0.5) continue;                        // 出生动画期间无敌
+    if (n.spawnT < 0.5) continue;
     const dx = n.x - player.x, dy = n.y - player.y;
     const d = Math.hypot(dx, dy);
     const hit = (player.size + n.size) * COLLIDE_FACTOR;
     if (d >= hit) continue;
     if (player.size >= n.size * EAT_RATIO) {
       eatNpc(n);
-      if (state !== 'playing') break;                    // 可能已通关
+      if (state !== 'playing') break;
     } else if (n.size >= player.size * EAT_RATIO) {
-      die(n);
-      return;
+      // 【新增】无敌护盾生效中：只弹开，不会死亡
+      if (player.invincible > 0) {
+        bouncePlayerNpc(n);
+        // 无敌期间撞大奶蛙给一点视觉反馈
+        if (Math.random() < 0.35) {
+          spawnBurst(
+            (player.x + n.x) / 2, (player.y + n.y) / 2,
+            '#FFD34E', 6
+          );
+        }
+      } else {
+        die(n);
+        return;
+      }
     } else {
-      bouncePlayerNpc(n);                                // 体型接近：互相弹开
+      bouncePlayerNpc(n);
     }
   }
 }
 
-// 吞噬：得分 + 成长 + 黄色光点爆炸 + 原地重生新 NPC
 function eatNpc(n) {
   const pts = Math.round(n.size * 10);
   score += pts;
   player.size = Math.min(player.size + GROW_RATE * (n.size / PLAYER_START_SIZE), MAX_WIN_SIZE);
   player.pulse = 1;
-  spawnBurst(n.x, n.y, '#FFE57A');                       // 黄色光点爆炸特效
+  spawnBurst(n.x, n.y, '#FFE57A');
   floatTexts.push({ x: n.x, y: n.y - n.size, text: '+' + pts, life: 1 });
-  Object.assign(n, createNpc(true));                     // 重生一只新的，保持场上数量
-  if (player.size >= MAX_WIN_SIZE) {                     // 体型达到上限 → 通关
+  Object.assign(n, createNpc(true));
+  if (player.size >= MAX_WIN_SIZE) {
     state = 'win';
     spawnConfetti();
   }
@@ -639,25 +709,30 @@ function bouncePlayerNpc(n) {
   const dx = n.x - player.x, dy = n.y - player.y;
   const d = Math.hypot(dx, dy) || 0.001;
   const overlap = (player.size + n.size) * COLLIDE_FACTOR - d;
-  // 互相弹开
   player.x -= dx / d * overlap * 0.5;
   player.y -= dy / d * overlap * 0.5;
   n.x += dx / d * overlap * 0.5;
   n.y += dy / d * overlap * 0.5;
-  // NPC 转向游开
   n.angle = Math.atan2(dy / d, dx / d) + (Math.random() - 0.5) * 0.8;
 }
 
 /* ===================== 绘制 ===================== */
 function draw() {
-  buttons = [];                                          // 重置本帧按钮点击区
+  buttons = [];
   drawBackground();
   if (state !== 'start') {
     for (const n of npcs) drawNpc(n);
-    if (state !== 'gameover') drawPlayer();              // 被吃后不再画玩家
+    if (state !== 'gameover') drawPlayer();
   }
   drawParticles();
   drawFloatTexts();
+
+  // 【新增】全屏爆炸闪光（在 HUD 下方，避免遮挡按钮）
+  if (screenFlash > 0) {
+    ctx.fillStyle = `rgba(255,222,150,${(screenFlash * 0.6).toFixed(3)})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
   if (state === 'playing') drawHUD();
   else if (state === 'start') drawStart();
   else if (state === 'gameover') drawGameOver();
@@ -665,27 +740,23 @@ function draw() {
 }
 
 function drawBackground() {
-  // 浅绿色池塘渐变
   const g = ctx.createLinearGradient(0, 0, 0, H);
   g.addColorStop(0, '#DCF2C6');
   g.addColorStop(0.6, '#C9E7AE');
   g.addColorStop(1, '#AFD692');
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, W, H);
-  // 顶部柔光
   const lg = ctx.createRadialGradient(W / 2, -H * 0.15, 10, W / 2, -H * 0.15, H * 0.9);
   lg.addColorStop(0, 'rgba(255,255,240,0.35)');
   lg.addColorStop(1, 'rgba(255,255,240,0)');
   ctx.fillStyle = lg;
   ctx.fillRect(0, 0, W, H);
-  // 水底鹅卵石
   for (const p of pebbles) {
     ctx.fillStyle = p.color;
     ctx.beginPath();
     ctx.ellipse(p.x, p.y, p.rx, p.ry, 0, 0, TAU);
     ctx.fill();
   }
-  // 水草（随风摆动）
   ctx.lineCap = 'round';
   for (const wd of weeds) {
     const sway = Math.sin(time * 1.1 + wd.phase) * 14;
@@ -701,7 +772,6 @@ function drawBackground() {
     ctx.stroke();
   }
   ctx.lineCap = 'butt';
-  // 气泡
   for (const b of bubbles) {
     ctx.globalAlpha = b.alpha;
     ctx.strokeStyle = 'rgba(255,255,255,0.9)';
@@ -717,7 +787,6 @@ function drawBackground() {
 }
 
 function drawNpc(n) {
-  // 危险警示：比你大的奶蛙画红色虚线光环
   if (SHOW_DANGER_RING && state === 'playing' && n.size > player.size * EAT_RATIO) {
     const pulse = 0.3 + 0.18 * Math.sin(time * 5 + n.breathPhase);
     const r = n.size * 1.22 + Math.sin(time * 4 + n.breathPhase) * 2;
@@ -729,7 +798,6 @@ function drawNpc(n) {
     ctx.stroke();
     ctx.setLineDash([]);
   }
-  // 出生动画：从小到大淡入
   const spawnScale = 0.35 + 0.65 * Math.min(1, n.spawnT);
   drawFrog(frogImages[n.variant], n.x, n.y, n.size * spawnScale, n.angle, time, n.breathPhase, 0, Math.min(1, n.spawnT * 2));
 }
@@ -743,11 +811,75 @@ function drawPlayer() {
   ctx.beginPath();
   ctx.arc(player.x, player.y, player.size * 1.5, 0, TAU);
   ctx.fill();
+
   drawFrog(frogImages[PLAYER_VARIANT - 1], player.x, player.y, player.size, player.angle, time, player.breathPhase, player.pulse);
-  // 接近通关时戴上小皇冠
+
+  // 【新增】无敌护盾
+  drawInvincibleShield();
+
   if (player.size >= MAX_WIN_SIZE * 0.85) {
     drawCrown(player.x, player.y - player.size * 0.95, player.size * 0.42);
   }
+}
+
+/* —— 【新增】开局无敌护盾绘制 —— */
+function drawInvincibleShield() {
+  const t = player.invincible;
+  if (t <= 0) return;
+
+  const ui = getUiScale();
+  const R = player.size * 1.42;
+  // 最后 3 秒加速闪烁，提示即将失效
+  const blinkSpeed = t < 3 ? 16 : 6;
+  const alpha = clamp(0.45 + 0.4 * Math.sin(time * blinkSpeed), 0.15, 0.9);
+
+  ctx.save();
+  ctx.translate(player.x, player.y);
+
+  // 外圈金色旋转虚线环
+  ctx.rotate(time * 1.9);
+  ctx.strokeStyle = `rgba(255,214,80,${alpha.toFixed(3)})`;
+  ctx.lineWidth = Math.max(2, player.size * 0.09);
+  ctx.setLineDash([player.size * 0.55, player.size * 0.34]);
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.arc(0, 0, R, 0, TAU);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // 内圈白色细环（反向旋转）
+  ctx.rotate(-time * 3.6);
+  ctx.strokeStyle = `rgba(255,255,255,${(alpha * 0.75).toFixed(3)})`;
+  ctx.lineWidth = Math.max(1.5, player.size * 0.045);
+  ctx.setLineDash([player.size * 0.25, player.size * 0.3]);
+  ctx.beginPath();
+  ctx.arc(0, 0, R * 0.87, 0, TAU);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.lineCap = 'butt';
+
+  // 柔光
+  const gg = ctx.createRadialGradient(0, 0, R * 0.55, 0, 0, R * 1.25);
+  gg.addColorStop(0, 'rgba(255,228,120,0)');
+  gg.addColorStop(1, `rgba(255,228,120,${(alpha * 0.28).toFixed(3)})`);
+  ctx.fillStyle = gg;
+  ctx.beginPath();
+  ctx.arc(0, 0, R * 1.25, 0, TAU);
+  ctx.fill();
+
+  ctx.restore();
+
+  // 剩余秒数文字
+  ctx.font = `bold ${Math.round(13 * ui)}px ${FONT}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const txt = '无敌 ' + t.toFixed(1) + 's';
+  const ty = player.y - player.size * 1.85;
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = 'rgba(255,255,255,0.92)';
+  ctx.strokeText(txt, player.x, ty);
+  ctx.fillStyle = '#C48A00';
+  ctx.fillText(txt, player.x, ty);
 }
 
 function drawParticles() {
@@ -756,7 +888,7 @@ function drawParticles() {
     if (p.type === 'ring') {
       ctx.globalAlpha = a;
       ctx.strokeStyle = p.color;
-      ctx.lineWidth = 3 + 4 * a;
+      ctx.lineWidth = 3 + 5 * a;
       ctx.beginPath();
       ctx.arc(p.x, p.y, p.r, 0, TAU);
       ctx.stroke();
@@ -767,12 +899,11 @@ function drawParticles() {
       ctx.arc(p.x, p.y, p.r * (0.5 + a * 0.5), 0, TAU);
       ctx.fill();
     } else if (p.type === 'bolt') {
-      /* —— 【新增】闪电链：玩家 → 目标，带随机折线抖动 —— */
+      /* 闪电链：玩家 → 目标，带随机折线抖动 */
       const segs = 7;
       ctx.globalAlpha = a;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
-      // 外层青色辉光
       ctx.strokeStyle = 'rgba(90,210,255,0.85)';
       ctx.lineWidth = 12 * a;
       ctx.beginPath();
@@ -787,7 +918,6 @@ function drawParticles() {
       }
       ctx.lineTo(p.x2, p.y2);
       ctx.stroke();
-      // 内层白芯
       ctx.strokeStyle = 'rgba(255,255,255,0.95)';
       ctx.lineWidth = 4 * a;
       ctx.beginPath();
@@ -849,7 +979,7 @@ function drawHUD() {
   ctx.strokeStyle = 'rgba(110,160,70,0.5)';
   ctx.lineWidth = 2;
   rr(pad, pad, w1, ph, ph / 2); ctx.stroke();
-  drawFrog(frogImages[0], pad + ph * 0.52, pad + ph * 0.5, iconR, 0, time, 0);   // 小奶蛙图标
+  drawFrog(frogImages[0], pad + ph * 0.52, pad + ph * 0.5, iconR, 0, time, 0);
   ctx.fillStyle = '#33691E';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
@@ -888,7 +1018,6 @@ function drawHUD() {
     ctx.fillStyle = pg;
     rr(bx, by, Math.max(bw * prog, bh), bh, bh / 2); ctx.fill();
   }
-  // 进度顶端小圆点
   ctx.fillStyle = '#FFFFFF';
   ctx.strokeStyle = '#E8A200';
   ctx.lineWidth = 2;
@@ -902,39 +1031,36 @@ function drawHUD() {
     const a = clamp(1 - (time - gameStartTime) / 10, 0, 1);
     if (a > 0) {
       ctx.globalAlpha = a * 0.9;
-      ctx.font = `bold ${Math.round(15 * ui)}px ${FONT}`;
+      ctx.font = `bold ${Math.round(14 * ui)}px ${FONT}`;
       ctx.textAlign = 'center';
       ctx.lineWidth = 4;
       ctx.strokeStyle = 'rgba(255,255,255,0.85)';
-      ctx.strokeText('吃掉比你小的奶蛙 · 躲开带红色光环的大奶蛙', W / 2, H - 46 * ui);
+      ctx.strokeText('吃掉比你小的奶蛙 · 躲开带红色光环的大奶蛙', W / 2, H - 40 * ui);
       ctx.fillStyle = '#2F5D24';
-      ctx.fillText('吃掉比你小的奶蛙 · 躲开带红色光环的大奶蛙', W / 2, H - 46 * ui);
+      ctx.fillText('吃掉比你小的奶蛙 · 躲开带红色光环的大奶蛙', W / 2, H - 40 * ui);
       ctx.globalAlpha = 1;
     }
   }
 
-  /* —— 【新增】右下角技能按钮 —— */
-  drawSkillButton();
+  /* —— 右下角技能按钮（闪电 + 爆炸） —— */
+  drawSkillButtons();
 }
 
-/* —— 【新增】技能按钮：右下角，显示闪电图标 / 冷却倒计时 —— */
-function drawSkillButton() {
+/* —— 技能按钮通用绘制 —— */
+function drawSkillButtonAt(cx, cy, r, cfg) {
   const ui = getUiScale();
-  const r = 32 * ui;
-  const cx = W - r - 16 * ui;
-  const cy = H - r - 28 * ui;
-  buttons.push({ x: cx - r, y: cy - r, w: r * 2, h: r * 2, skill: true });
+  buttons.push({ x: cx - r, y: cy - r, w: r * 2, h: r * 2, skill: cfg.id });
 
-  const ready = player.skillCd <= 0;
-  const prog = ready ? 1 : 1 - player.skillCd / SKILL_COOLDOWN;   // 0~1 充能进度
+  const ready = cfg.cd <= 0;
+  const prog = ready ? 1 : 1 - cfg.cd / cfg.total;
   const hover = mouse.active && Math.hypot(mouse.x - cx, mouse.y - cy) <= r * 1.1;
 
-  // 就绪时的呼吸光晕
+  // 就绪光晕
   if (ready) {
     const glow = r * 1.5 + Math.sin(time * 4) * 6 * ui;
     const gg = ctx.createRadialGradient(cx, cy, r * 0.5, cx, cy, glow);
-    gg.addColorStop(0, 'rgba(120,226,255,0.5)');
-    gg.addColorStop(1, 'rgba(120,226,255,0)');
+    gg.addColorStop(0, cfg.glow);
+    gg.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = gg;
     ctx.beginPath(); ctx.arc(cx, cy, glow, 0, TAU); ctx.fill();
   }
@@ -942,13 +1068,13 @@ function drawSkillButton() {
   // 底盘
   ctx.fillStyle = ready ? (hover ? '#FFFFFF' : 'rgba(255,255,255,0.94)') : 'rgba(228,236,222,0.88)';
   ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.fill();
-  ctx.strokeStyle = ready ? '#22B8E0' : 'rgba(120,145,110,0.55)';
+  ctx.strokeStyle = ready ? cfg.color : 'rgba(120,145,110,0.55)';
   ctx.lineWidth = 3 * ui;
   ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.stroke();
 
-  // 冷却进度环（从 12 点方向顺时针充能）
+  // 冷却进度环
   if (!ready) {
-    ctx.strokeStyle = '#22B8E0';
+    ctx.strokeStyle = cfg.color;
     ctx.lineWidth = 4 * ui;
     ctx.lineCap = 'round';
     ctx.beginPath();
@@ -961,44 +1087,96 @@ function drawSkillButton() {
   ctx.textBaseline = 'middle';
 
   if (ready) {
-    // 闪电图标
-    const ic = r * 0.58;
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.fillStyle = '#0FA3C9';
-    ctx.beginPath();
-    ctx.moveTo(ic * 0.22, -ic);
-    ctx.lineTo(-ic * 0.50, ic * 0.10);
-    ctx.lineTo(-ic * 0.06, ic * 0.10);
-    ctx.lineTo(-ic * 0.22, ic);
-    ctx.lineTo(ic * 0.52, -ic * 0.12);
-    ctx.lineTo(ic * 0.06, -ic * 0.12);
-    ctx.closePath();
-    ctx.fill();
-    ctx.restore();
-
-    ctx.fillStyle = '#0D6E8A';
-    ctx.font = `bold ${Math.round(11 * ui)}px ${FONT}`;
-    ctx.fillText('空格 / 点击', cx, cy + r + 11 * ui);
+    cfg.drawIcon(cx, cy, r);
+    ctx.fillStyle = cfg.color;
+    ctx.font = `bold ${Math.round(10 * ui)}px ${FONT}`;
+    ctx.fillText(cfg.hint, cx, cy + r + 10 * ui);
   } else {
-    // 冷却倒计时秒数
     ctx.fillStyle = '#4E7A46';
     ctx.font = `bold ${Math.round(19 * ui)}px ${FONT}`;
-    ctx.fillText(String(Math.ceil(player.skillCd)), cx, cy + 1);
-
+    ctx.fillText(String(Math.ceil(cfg.cd)), cx, cy + 1);
     ctx.fillStyle = '#6B8A5E';
-    ctx.font = `bold ${Math.round(11 * ui)}px ${FONT}`;
-    ctx.fillText('冷却中', cx, cy + r + 11 * ui);
+    ctx.font = `bold ${Math.round(10 * ui)}px ${FONT}`;
+    ctx.fillText('冷却中', cx, cy + r + 10 * ui);
   }
+}
+
+function drawSkillButtons() {
+  const ui = getUiScale();
+  const r = 30 * ui;
+  const cy = H - r - 30 * ui;
+  const cx1 = W - r - 14 * ui;                 // 闪电（最右）
+  const cx2 = cx1 - r * 2 - 12 * ui;           // 爆炸（左边）
+
+  // 闪电按钮
+  drawSkillButtonAt(cx1, cy, r, {
+    id: 'bolt',
+    cd: player.skillCd,
+    total: SKILL_COOLDOWN,
+    color: '#0FA3C9',
+    glow: 'rgba(120,226,255,0.5)',
+    hint: '空格',
+    drawIcon: drawBoltIcon,
+  });
+
+  // 爆炸按钮
+  drawSkillButtonAt(cx2, cy, r, {
+    id: 'bomb',
+    cd: player.bombCd,
+    total: BOMB_COOLDOWN,
+    color: '#F4511E',
+    glow: 'rgba(255,150,90,0.5)',
+    hint: 'E 键',
+    drawIcon: drawBombIcon,
+  });
+}
+
+function drawBoltIcon(cx, cy, r) {
+  const ic = r * 0.58;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.fillStyle = '#0FA3C9';
+  ctx.beginPath();
+  ctx.moveTo(ic * 0.22, -ic);
+  ctx.lineTo(-ic * 0.50, ic * 0.10);
+  ctx.lineTo(-ic * 0.06, ic * 0.10);
+  ctx.lineTo(-ic * 0.22, ic);
+  ctx.lineTo(ic * 0.52, -ic * 0.12);
+  ctx.lineTo(ic * 0.06, -ic * 0.12);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+/* —— 【新增】爆炸图标：八角星火花 —— */
+function drawBombIcon(cx, cy, r) {
+  const ic = r * 0.62;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.fillStyle = '#F4511E';
+  const spikes = 8;
+  ctx.beginPath();
+  for (let i = 0; i < spikes * 2; i++) {
+    const rad = (i % 2 === 0) ? ic : ic * 0.42;
+    const a = (i / (spikes * 2)) * TAU - Math.PI / 2;
+    const px = Math.cos(a) * rad, py = Math.sin(a) * rad;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#FFD34E';
+  ctx.beginPath();
+  ctx.arc(0, 0, ic * 0.33, 0, TAU);
+  ctx.fill();
+  ctx.restore();
 }
 
 /* ===================== 三个界面 ===================== */
 function drawStart() {
   const ui = getUiScale();
-  const compact = H < 520;
+  const compact = H < 560;
 
-  /* —— 标题 —— */
-  const ty = H * 0.19 + Math.sin(time * 1.6) * 7;
+  const ty = H * 0.17 + Math.sin(time * 1.6) * 7;
   ctx.font = `bold ${Math.round(Math.min(64, W * 0.12))}px ${FONT}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -1012,7 +1190,6 @@ function drawStart() {
   ctx.fillStyle = tg;
   ctx.fillText('奶蛙大吃小', W / 2, ty);
 
-  /* —— 素材未加载完成：显示进度，禁止开始 —— */
   if (!assetsReady) {
     ctx.fillStyle = '#2F5D24';
     ctx.font = `bold ${Math.round(18 * ui)}px ${FONT}`;
@@ -1020,47 +1197,58 @@ function drawStart() {
     return;
   }
 
-  /* —— 主角奶蛙（呼吸 + 轻微摇摆） —— */
-  const heroSize = Math.min(compact ? 70 : 95, H * 0.2, W * 0.24);
-  const heroY = compact ? H * 0.42 : H * 0.4;
+  const heroSize = Math.min(compact ? 62 : 88, H * 0.19, W * 0.24);
+  const heroY = compact ? H * 0.40 : H * 0.37;
   drawFrog(frogImages[PLAYER_VARIANT - 1], W / 2, heroY + Math.sin(time * 2) * 6, heroSize, Math.sin(time * 0.7) * 0.22, time, 0);
+  // 主角周围画一圈无敌护盾示意
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,214,80,0.75)';
+  ctx.lineWidth = 3;
+  ctx.setLineDash([10, 8]);
+  ctx.beginPath();
+  ctx.arc(W / 2, heroY + Math.sin(time * 2) * 6, heroSize * 1.42, 0, TAU);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
 
   if (compact) {
-    ctx.font = `bold ${Math.round(15 * ui)}px ${FONT}`;
+    ctx.font = `bold ${Math.round(14 * ui)}px ${FONT}`;
     ctx.fillStyle = '#2F5D24';
-    ctx.fillText('移动鼠标 / 手指 · 吃掉小的躲开大的', W / 2, H * 0.60);
-    ctx.fillText('空格 / 右下按钮：消灭最大奶蛙（30 秒一次）', W / 2, H * 0.60 + 24 * ui);
+    ctx.fillText('开局 10 秒无敌 · 吃掉小的躲开大的', W / 2, H * 0.57);
+    ctx.fillStyle = '#0FA3C9';
+    ctx.fillText('空格：闪电消灭最大奶蛙', W / 2, H * 0.57 + 23 * ui);
+    ctx.fillStyle = '#F4511E';
+    ctx.fillText('E 键：烈焰爆炸，范围全灭', W / 2, H * 0.57 + 46 * ui);
   } else {
     /* —— 五种表情变体展示 —— */
-    const rowY = H * 0.63;
-    const vs = Math.min(36, W * 0.075);
-    const gap = Math.min(W * 0.18, 105);
+    const rowY = H * 0.62;
+    const vs = Math.min(34, W * 0.072);
+    const gap = Math.min(W * 0.18, 100);
     for (let i = 0; i < 5; i++) {
       const x = W / 2 + (i - 2) * gap;
-      const face = x < W / 2 ? 0.12 : Math.PI - 0.12;   // 朝向中心
+      const face = x < W / 2 ? 0.12 : Math.PI - 0.12;
       drawFrog(frogImages[i], x, rowY + Math.sin(time * 2 + i) * 4, vs, face, time, i * 1.3);
-      ctx.font = `${Math.round(13 * ui)}px ${FONT}`;
+      ctx.font = `${Math.round(12 * ui)}px ${FONT}`;
       ctx.fillStyle = 'rgba(47,93,36,0.85)';
-      ctx.fillText(VARIANT_NAMES[i], x, rowY + vs + 22);
+      ctx.fillText(VARIANT_NAMES[i], x, rowY + vs + 20);
     }
     /* —— 玩法说明 —— */
-    ctx.font = `bold ${Math.round(16 * ui)}px ${FONT}`;
+    ctx.font = `bold ${Math.round(15 * ui)}px ${FONT}`;
     ctx.fillStyle = '#2F5D24';
-    ctx.fillText('移动鼠标 / 滑动手指，控制你的奶蛙', W / 2, H * 0.79);
-    ctx.fillText('吃掉比你小的奶蛙长大，躲开比你大的！', W / 2, H * 0.79 + 26 * ui);
-    ctx.fillStyle = '#0D6E8A';
-    ctx.fillText('空格 / 右下按钮：闪电技能，消灭场上最大的奶蛙', W / 2, H * 0.79 + 52 * ui);
+    ctx.fillText('移动鼠标 / 滑动手指控制奶蛙 · 开局 10 秒无敌护盾', W / 2, H * 0.78);
+    ctx.fillStyle = '#0FA3C9';
+    ctx.fillText('空格 / 右下按钮：闪电，消灭场上最大的奶蛙', W / 2, H * 0.78 + 24 * ui);
+    ctx.fillStyle = '#F4511E';
+    ctx.fillText('E 键 / 右下按钮：烈焰爆炸，范围内全部炸飞', W / 2, H * 0.78 + 48 * ui);
   }
 
-  /* —— 开始提示（闪烁） —— */
   ctx.globalAlpha = 0.55 + 0.45 * Math.sin(time * 3.2);
-  ctx.font = `bold ${Math.round(20 * ui)}px ${FONT}`;
+  ctx.font = `bold ${Math.round(19 * ui)}px ${FONT}`;
   ctx.fillStyle = '#1B5E20';
-  ctx.fillText('点击任意位置开始游戏', W / 2, compact ? H * 0.80 : H * 0.92);
+  ctx.fillText('点击任意位置开始游戏', W / 2, compact ? H * 0.78 : H * 0.94);
   ctx.globalAlpha = 1;
 }
 
-// 半透明遮罩 + 居中面板
 function drawPanel(panelW, panelH) {
   ctx.fillStyle = 'rgba(25,50,25,0.45)';
   ctx.fillRect(0, 0, W, H);
@@ -1094,7 +1282,6 @@ function drawGameOver() {
   ctx.fillStyle = '#E0503F';
   ctx.fillText('被吃掉啦！', W / 2, py + 52 * ui);
 
-  // 凶手奶蛙
   const ks = Math.min(50, ph * 0.17);
   drawFrog(frogImages[lastKiller.variant], W / 2, py + ph * 0.3 + Math.sin(time * 2) * 3, ks, -0.25, time, 2);
 
@@ -1122,7 +1309,6 @@ function drawWin() {
   ctx.fillStyle = '#F5A623';
   ctx.fillText('恭喜通关！', W / 2, py + 52 * ui);
 
-  // 戴上皇冠的奶蛙王
   const fs = Math.min(58, ph * 0.16);
   const fy = py + ph * 0.3 + Math.sin(time * 2) * 3;
   drawFrog(frogImages[PLAYER_VARIANT - 1], W / 2, fy, fs, Math.sin(time * 0.9) * 0.12, time, 0);
@@ -1139,7 +1325,6 @@ function drawWin() {
   drawButton(W / 2, py + ph * 0.84, 190 * ui, 52 * ui, '再来一局', Math.round(20 * ui));
 }
 
-// 绘制圆角按钮并记录点击区域
 function drawButton(cx, cy, w, h, label, fontSize) {
   const x = cx - w / 2, y = cy - h / 2;
   buttons.push({ x, y, w, h });
@@ -1168,7 +1353,6 @@ function drawButton(cx, cy, w, h, label, fontSize) {
 
 /* ===================== 窗口自适应 ===================== */
 function onResize() {
-  // 按 devicePixelRatio 缩放画布，保证高分屏文字清晰
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   W = window.innerWidth;
   H = window.innerHeight;
@@ -1178,7 +1362,6 @@ function onResize() {
   canvas.style.height = H + 'px';
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   initScenery();
-  // 将已有实体限制在新边界内
   if (player) {
     player.x = clamp(player.x, 10, W - 10);
     player.y = clamp(player.y, 10, H - 10);
@@ -1192,7 +1375,7 @@ function onResize() {
 /* ===================== 主循环 ===================== */
 function loop(ts) {
   const now = ts / 1000;
-  const dt = clamp(now - lastTime, 0.001, 0.05);        // 限制帧间隔，避免切后台后瞬移
+  const dt = clamp(now - lastTime, 0.001, 0.05);
   lastTime = now;
   update(dt);
   draw();
@@ -1202,7 +1385,7 @@ function loop(ts) {
 /* ===================== 启动 ===================== */
 player = createPlayer();
 onResize();
-preloadAssets();                                        // 预加载完成后才能开始游戏
+preloadAssets();
 requestAnimationFrame(loop);
 </script>
 </body>
